@@ -11,17 +11,30 @@ import struct
 from datetime import datetime, timedelta
 import serial
 import threading
+import os.path
+import configparser
 
 
 class serial_read_GUI(QtGui.QMainWindow):
-    # send_chans = QtCore.pyqtSignal('QVariantList')
-    # send_state = QtCore.pyqtSignal('QVariantList')
-
     def __init__(self):
         super().__init__()
 
+        # Check for config file, if doesn't exist create it,
+        # if exists load values
+        self.config = configparser.ConfigParser()
+        if not os.path.isfile('./config.ini'):
+            self.config['DEFAULT'] = {'pirs': 12,
+                                'port': 'COM7',
+                                'baudrate': '115200',
+                                'samplingperiod': '60',
+                                'defaultpath:': './'}
+            with open('./config.ini', 'w') as configfile:
+                self.config.write(configfile)
+        else:
+            self.config.read('./config.ini')
+
         self.on_toggle = False
-        self.n_pirs = 12
+        self.n_pirs = int(self.config['DEFAULT'].get('pirs'))
         self.active_chans = []
         self.state = False
 
@@ -40,15 +53,15 @@ class serial_read_GUI(QtGui.QMainWindow):
         self.layout.addWidget(QtGui.QLabel(''), 2, 1)
 
         self.layout.addWidget(QtGui.QLabel('Port'), 1, 1)
-        self.port = QtGui.QLineEdit('COM7', self)
+        self.port = QtGui.QLineEdit(self.config['DEFAULT'].get('port'), self)
         self.layout.addWidget(self.port, 1, 2)
 
         self.layout.addWidget(QtGui.QLabel('Baudrate:'), 1, 3)
-        self.baud = QtGui.QLineEdit('115200', self)
+        self.baud = QtGui.QLineEdit(self.config['DEFAULT'].get('baudrate'), self)
         self.layout.addWidget(self.baud, 1, 4)
 
         self.layout.addWidget(QtGui.QLabel('Sampling rate:'), 1, 5)
-        self.winsize = QtGui.QLineEdit('60', self)
+        self.winsize = QtGui.QLineEdit(self.config['DEFAULT'].get('samplingperiod'), self)
         self.layout.addWidget(self.winsize, 1, 6)
 
         self.name = []
@@ -89,6 +102,10 @@ class serial_read_GUI(QtGui.QMainWindow):
         self.stopbtn.clicked.connect(self.StopRecord)
         self.layout.addWidget(self.stopbtn, 7, 6)
 
+        self.writeconfbtn = QtGui.QPushButton('Update Config')
+        self.writeconfbtn.clicked.connect(self.writeconfig)
+        self.layout.addWidget(self.writeconfbtn, 9, 6)
+
         centralwidget.setLayout(self.layout)
         self.setCentralWidget(centralwidget)
 
@@ -105,11 +122,21 @@ class serial_read_GUI(QtGui.QMainWindow):
             self.ser = serial.Serial(self.port.text(), self.baud.text())
             print('Connected')
 
-            # Deactivate the button to avoid messing with IO
-            self.serialbtn.setEnabled(False)
+            # # Deactivate the button to avoid messing with IO
+            # self.serialbtn.setEnabled(False)
 
         except serial.SerialException as e:
             print('Error connecting to serial port: {0}'.format(e) + '\n')
+
+    def ReconnectSerial(self):
+        try:
+            self.ser = serial.Serial(self.port.text(), self.baud.text())
+            print('Serial reconnected')
+            self.StartRecord()
+        except serial.SerialException:
+            print('.', end='')
+            time.sleep(2)
+            self.ReconnectSerial()
 
     @QtCore.pyqtSlot()
     def StartRecord(self):
@@ -145,6 +172,13 @@ class serial_read_GUI(QtGui.QMainWindow):
         with lock:
             self.active_chans = [(i, self.name[i].text()) for (i, j)
                                  in enumerate(self.active) if j.isChecked()]
+
+    def writeconfig(self):
+        self.config.set('DEFAULT', 'port', self.port.text())
+        self.config.set('DEFAULT', 'baudrate', self.baud.text())
+        self.config.set('DEFAULT', 'samplingperiod', self.winsize.text())
+        with open('./config.ini', 'w') as configfile:
+            self.config.write(configfile)
 
     @QtCore.pyqtSlot()
     def Record(self):
@@ -214,6 +248,10 @@ class serial_read_GUI(QtGui.QMainWindow):
             # Terminate the thread if loop is toggled off
             return
 
+        except serial.SerialException:
+            print('Serial connection lost, trying to reconnect', end='')
+            self.ReconnectSerial()
+
         except Exception as e:
             print('Error: {0}'.format(e) + '\n')
             return
@@ -239,7 +277,7 @@ class serial_read_GUI(QtGui.QMainWindow):
             status = np.asarray(status)
 
             days = np.floor(time_)
-            x = time_ - days
+            x = (time_ - days) * 24
             y = status + (days[-1] - days)
 
             self.win = pg.GraphicsWindow()
@@ -248,11 +286,17 @@ class serial_read_GUI(QtGui.QMainWindow):
 
             for i in range(int(days[0]), int(days[-1]) + 1):
                 self.p1.plot(x[days == i], y[days == i], pen='r')
-                self.p1.plot(x[days == i-1]+1,           # double-plot
-                             y[days == i-1]+1, pen='r')
-            self.p1.plot(x[days == int(days[-1])]+1,           # double-plot
-                         y[days == int(days[-1])]+1, pen='r')  # last day
+                self.p1.plot(x[days == i-1] + 24,                # double-plot
+                             y[days == i-1] + 1, pen='r')
+            self.p1.plot(x[days == int(days[-1])] + 24,          # double-plot
+                         y[days == int(days[-1])] + 1, pen='r')  # last day
+            
+            # Set axis layout
+            self.xax = self.p1.getAxis('bottom')
+            self.xax.setTickSpacing(24, 2)
+            self.yax = self.p1.getAxis('left')  
             self.p1.showGrid(x=True, y=True)
+
         except FileNotFoundError:
             print('No file')
 
@@ -266,6 +310,6 @@ if __name__ == '__main__':
 
 """
 TODO:
-    [ ] Add restore state function for power outages or unexpected restarts
     [ ] Label axes
+    [ ] show maxval
 """
