@@ -16,6 +16,8 @@ import configparser
 
 
 class serial_read_GUI(QtGui.QMainWindow):
+    """GUI."""
+
     def __init__(self):
         super().__init__()
 
@@ -23,13 +25,22 @@ class serial_read_GUI(QtGui.QMainWindow):
         # if exists load values
         self.config = configparser.ConfigParser()
         if not os.path.isfile('./config.ini'):
-            self.config['DEFAULT'] = {'pirs': 12,
-                                'port': 'COM7',
-                                'baudrate': '115200',
-                                'samplingperiod': '60',
-                                'defaultpath:': './'}
+            default_config = '''
+                             [DEFAULT]
+                             pirs = 12
+                             port = COM7
+                             baudrate = 115200
+                             samplingperiod = 60
+                             defaultpath = ./
+
+                             [RECORDING]
+                             active_channels = 
+                             channel_names =
+                             '''
+            self.config.read_string(default_config)
             with open('./config.ini', 'w') as configfile:
                 self.config.write(configfile)
+
         else:
             self.config.read('./config.ini')
 
@@ -42,7 +53,7 @@ class serial_read_GUI(QtGui.QMainWindow):
 
     @QtCore.pyqtSlot()
     def initUI(self):
-        # uic.loadUi('SerialReadUI.ui', self)
+        """Initialize the GUI layout and elements."""
         self.setWindowTitle('Arduino Serial Reader')
 
         centralwidget = QtGui.QWidget()
@@ -100,19 +111,34 @@ class serial_read_GUI(QtGui.QMainWindow):
 
         self.stopbtn = QtGui.QPushButton('Stop')
         self.stopbtn.clicked.connect(self.StopRecord)
+        self.stopbtn.setEnabled(False)
         self.layout.addWidget(self.stopbtn, 7, 6)
-
-        self.writeconfbtn = QtGui.QPushButton('Update Config')
-        self.writeconfbtn.clicked.connect(self.writeconfig)
-        self.layout.addWidget(self.writeconfbtn, 9, 6)
 
         centralwidget.setLayout(self.layout)
         self.setCentralWidget(centralwidget)
 
+        # Set state as it was last time the program was open
+        prev_chans = self.config['RECORDING'].get('active_channels').split(',')
+        if not prev_chans[0] == '':
+            prev_names = self.config['RECORDING'].get('channel_names').split(',')
+            previous_state = zip(prev_chans, prev_names)
+            for chan, name in previous_state:
+                self.active[int(chan)].setChecked(True)
+                self.name[int(chan)].setText(name)
+
+        # Try to autostart
+        try:
+            self.StartSerial()
+            self.StartRecord()
+        except serial.SerialException:
+            print('Recording not started\n')
+
+
     @QtCore.pyqtSlot()
     def SelectFile(self):
+        path = self.config['RECORDING'].get('defaultpath')
         sender = int(self.sender().text())-1
-        filename = QtGui.QFileDialog.getSaveFileName()
+        filename = QtGui.QFileDialog.getSaveFileName(directory=path)
         self.name[sender].setText(filename[0])
 
     @QtCore.pyqtSlot()
@@ -122,16 +148,23 @@ class serial_read_GUI(QtGui.QMainWindow):
             self.ser = serial.Serial(self.port.text(), self.baud.text())
             print('Connected')
 
-            # # Deactivate the button to avoid messing with IO
-            # self.serialbtn.setEnabled(False)
+            # Deactivate the button to avoid messing with IO
+            self.serialbtn.setEnabled(False)
+            self.stopbtn.setEnabled(True)
 
-        except serial.SerialException as e:
-            print('Error connecting to serial port: {0}'.format(e) + '\n')
+        except serial.SerialException:
+            print('Connection to Arduino was not established\nPlease check Arduino is connected and port is set correctly')
+            # If error happened during initialization, raise again so record does not start
+            if sys._getframe(1).f_code.co_name == 'initUI':
+                raise serial.SerialException
+                
+
 
     def ReconnectSerial(self):
         try:
             self.ser = serial.Serial(self.port.text(), self.baud.text())
             print('Serial reconnected')
+            self.serialbtn.setEnabled(False)
             self.StartRecord()
         except serial.SerialException:
             print('.', end='')
@@ -153,8 +186,9 @@ class serial_read_GUI(QtGui.QMainWindow):
         t.start()
 
         # Deactivate button so we know it worked and we don't risk that a
-        # new thread is created (though an exception should occur before)
+        # new thread is created
         self.startbtn.setEnabled(False)
+        self.stopbtn.setEnabled(True)
 
     @QtCore.pyqtSlot()
     def StopRecord(self):
@@ -164,19 +198,22 @@ class serial_read_GUI(QtGui.QMainWindow):
         print('recording stopped')
 
         self.startbtn.setEnabled(True)
+        self.stopbtn.setEnabled(False)
 
     @QtCore.pyqtSlot()
     def set_active_chans(self):
-        """Set channels whenever one is selected or its name change."""
+        """Set channels whenever one is selected or its name change, and update config.ini."""
         lock = threading.Lock()
         with lock:
             self.active_chans = [(i, self.name[i].text()) for (i, j)
                                  in enumerate(self.active) if j.isChecked()]
 
-    def writeconfig(self):
+        # Update config.ini
         self.config.set('DEFAULT', 'port', self.port.text())
         self.config.set('DEFAULT', 'baudrate', self.baud.text())
         self.config.set('DEFAULT', 'samplingperiod', self.winsize.text())
+        self.config.set('RECORDING', 'active_channels', ','.join([str(i[0]) for i in self.active_chans]))
+        self.config.set('RECORDING', 'channel_names', ','.join([i[1] for i in self.active_chans]))
         with open('./config.ini', 'w') as configfile:
             self.config.write(configfile)
 
@@ -189,6 +226,11 @@ class serial_read_GUI(QtGui.QMainWindow):
         winsize period.
         Code runs in an infinite loop that can be toggled on and off with
         self.state.
+        
+        Note:
+        This is in the main window class because I could not figure how to
+        make pyQT send parameter signals accross threads and classes correctly.
+        In a future version, a new class should be created.
         """
         winsize = timedelta(seconds=int(self.winsize.text()))
         try:
@@ -249,6 +291,7 @@ class serial_read_GUI(QtGui.QMainWindow):
             return
 
         except serial.SerialException:
+            self.serialbtn.setEnabled(True)
             print('Serial connection lost, trying to reconnect', end='')
             self.ReconnectSerial()
 
@@ -258,6 +301,7 @@ class serial_read_GUI(QtGui.QMainWindow):
 
     @QtCore.pyqtSlot()
     def drawActogram(self):
+        """Draw Actogram for the corresponding channel."""
         try:
             sender = ''.join([x for x in self.sender().text()
                               if x.isnumeric()])
