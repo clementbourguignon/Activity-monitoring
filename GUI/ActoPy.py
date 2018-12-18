@@ -2,7 +2,7 @@
 # Copyright © 2018 Clément Bourguignon, The Storch Lab, McGill
 # Distributed under terms of the MIT license.
 
-from pyqtgraph.Qt import QtGui, QtCore
+from pyqtgraph.Qt import QtGui, QtCore, QtWidgets
 import numpy as np
 import pyqtgraph as pg
 import sys
@@ -13,12 +13,29 @@ import serial
 import threading
 import os.path
 import configparser
+import logging
 
 
-class serial_read_GUI(QtGui.QMainWindow):
+class QTextEditLogger(logging.Handler):
+    """Text logger class."""
+
+    def __init__(self, parent):
+        super().__init__()
+        self.widget = QtWidgets.QPlainTextEdit(parent)
+        self.widget.setReadOnly(True)
+
+    def emit(self, record):
+        """Emit the message from logging to textbox."""
+        msg = self.format(record)
+        self.widget.appendPlainText(msg)
+        self.widget.moveCursor(QtGui.QTextCursor.End)
+
+
+class serial_read_GUI(QtGui.QMainWindow, QtWidgets.QPlainTextEdit):
     """GUI."""
 
     def __init__(self):
+        """Declare some variables, load config."""
         super().__init__()
 
         # Check for config file, if doesn't exist create it,
@@ -49,6 +66,8 @@ class serial_read_GUI(QtGui.QMainWindow):
         self.n_pirs = int(self.config['DEFAULT'].get('pirs'))
         self.active_chans = []
         self.state = False
+
+        self.allowClose = True
 
         self.initUI()
 
@@ -117,8 +136,11 @@ class serial_read_GUI(QtGui.QMainWindow):
         self.stopbtn.setEnabled(False)
         self.layout.addWidget(self.stopbtn, 7, 6)
 
-        self.textoutput = QtGui.QLabel('Ready')
-        self.layout.addWidget(self.textoutput, 9, 6, 4, 1)
+        self.logTextBox = QTextEditLogger(self)
+        self.logTextBox.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', '%Y-%m-%d %H:%M:%S'))
+        logging.getLogger().addHandler(self.logTextBox)
+        logging.getLogger().setLevel(logging.INFO)
+        self.layout.addWidget(self.logTextBox.widget, 9, 6, 6, 1)
 
         centralwidget.setLayout(self.layout)
         self.setCentralWidget(centralwidget)
@@ -129,16 +151,16 @@ class serial_read_GUI(QtGui.QMainWindow):
             prev_names = self.config['RECORDING'].get('channel_names').split(',')
             previous_state = zip(prev_chans, prev_names)
             for chan, name in previous_state:
-                self.active[int(chan)].setChecked(True)
                 self.name[int(chan)].setText(name)
+                self.active[int(chan)].setChecked(True)
 
         # Try to autostart
         try:
             self.StartSerial()
             self.StartRecord()
         except serial.SerialException:
-            # print('Recording not started\n')
-            self.textoutput.setText('Recording not started')
+            print('Recording not started\n')
+            logging.error('Recording not started')
 
 
     @QtCore.pyqtSlot()
@@ -153,18 +175,18 @@ class serial_read_GUI(QtGui.QMainWindow):
         try:
             # Initialize connection to serial port
             self.ser = serial.Serial(self.port.text(), self.baud.text())
-            # print('Connected')
-            self.textoutput.setText('Connected')
+            print('Connected')
+            logging.info('Arduino connected')
 
             # Deactivate the button to avoid messing with IO
             self.serialbtn.setEnabled(False)
             self.startbtn.setEnabled(True)
 
         except serial.SerialException:
-            # print('Connection to Arduino was not established\n'
-            #       'Check if Arduino is connected and port is set correctly')
-            self.textoutput.setText('Connection to Arduino was not established\n'
+            print('Connection to Arduino was not established\n'
                   'Check if Arduino is connected and port is set correctly')
+            logging.error('Connection to Arduino was not established\n'
+                          'Check if Arduino is connected and port is set correctly')
 
             # If error happened during initialization,
             # raise so record does not start
@@ -174,13 +196,12 @@ class serial_read_GUI(QtGui.QMainWindow):
     def ReconnectSerial(self):
         try:
             self.ser = serial.Serial(self.port.text(), self.baud.text())
-            # print('Serial reconnected')
-            self.textoutput.setText('Serial reconnected')
+            print('Serial reconnected')
+            logging.info('Serial reconnected')
             self.serialbtn.setEnabled(False)
             self.StartRecord()
         except serial.SerialException:
-            # print('.', end='')
-            self.textoutput.setText(self.textoutput.text() + '.')
+            print('.', end='')
             time.sleep(2)
             self.ReconnectSerial()
 
@@ -189,8 +210,8 @@ class serial_read_GUI(QtGui.QMainWindow):
         lock = threading.Lock()
         with lock:
             self.state = True
-        # print('recording started')
-        self.textoutput.setText('recording started')
+        print('recording started')
+        logging.info('Recording started')
 
         # We want the reading/recording loop to happen in another thread so
         # the GUI is not frozen and can be moved, plot things, etc.
@@ -200,20 +221,23 @@ class serial_read_GUI(QtGui.QMainWindow):
         t.start()
 
         # Deactivate button so we know it worked and we don't risk that a
-        # new thread is created
+        # new thread is created, and prevent from closing
         self.startbtn.setEnabled(False)
         self.stopbtn.setEnabled(True)
+        self.allowClose = False
+
 
     @QtCore.pyqtSlot()
     def StopRecord(self):
         lock = threading.Lock()
         with lock:
             self.state = False
-        # print('recording stopped')
-        self.textoutput.setText('recording stopped')
+        print('recording stopped')
+        logging.info('Recording stopped')
 
         self.startbtn.setEnabled(True)
         self.stopbtn.setEnabled(False)
+        self.allowClose = True
 
     @QtCore.pyqtSlot()
     def set_active_chans(self):
@@ -288,8 +312,8 @@ class serial_read_GUI(QtGui.QMainWindow):
                     self.activity_count[i[0]].setText(
                                                 '%s' % (summing_array[i[0]]))
 
-                # # Monitor output in console
-                # print('\t'.join(statusmonitor))
+                # Monitor output in console
+                print('\t'.join(statusmonitor))
 
                 # Check if time to write to file, if so write data to files
                 current_time = datetime.now()
@@ -303,8 +327,8 @@ class serial_read_GUI(QtGui.QMainWindow):
                                                             bin_start, float_avg)
                                 f.write(out_string)
                         except FileNotFoundError:
-                            # print('chan %d: incorrect filename' % (n[0]+1))
-                            self.textoutput.setText('chan %d: incorrect filename' % (n[0]+1))
+                            print('chan %d: incorrect filename' % (n[0]+1))
+                            logging.warning('chan {}: incorrect filename'.format(n[0]+1))
 
                     # Reinitialize values
                     summing_array = [0 for x in range(0, self.n_pirs)]
@@ -318,15 +342,13 @@ class serial_read_GUI(QtGui.QMainWindow):
 
         except serial.SerialException:
             self.serialbtn.setEnabled(True)
-            # print('Serial connection lost, trying to reconnect', end='')
-            self.textoutput.setText('Serial connection lost, trying to reconnect\n')
+            print('Serial connection lost, trying to reconnect', end='')
+            logging.error('Serial connection lost, trying to reconnect')
             self.ReconnectSerial()
 
-        
-
         except Exception as e:
-            # print('Error: {0}'.format(e) + '\n')
-            self.textoutput.setText('Error: {0}'.format(e))
+            print('Error: {0}'.format(e) + '\n')
+            logging.error('Error: {0}'.format(e) + '\n')
 
     @QtCore.pyqtSlot()
     def drawActogram(self):
@@ -334,8 +356,7 @@ class serial_read_GUI(QtGui.QMainWindow):
         try:
             sender = ''.join([x for x in self.sender().text()
                               if x.isnumeric()])
-            # print('plotting ' + sender)
-            self.textoutput.setText('plotting ' + sender)
+            print('plotting ' + sender)
             sender = int(sender)-1
 
             time_ = []
@@ -372,8 +393,16 @@ class serial_read_GUI(QtGui.QMainWindow):
             self.p1.showGrid(x=True, y=True)
 
         except FileNotFoundError:
-            # print('No file')
-            self.textoutput.setText('No File')
+            print('No file')
+
+    @QtCore.pyqtSlot()
+    def closeEvent(self, evnt):
+        """Prevent from closing when recording by overriding behavior."""
+        if self.allowClose:
+            super().closeEvent(evnt)
+        else:
+            evnt.ignore()
+            logging.warning('Recording, first stop to close')
 
 
 if __name__ == '__main__':
@@ -387,8 +416,4 @@ if __name__ == '__main__':
 TODO:
     [?] Label axes
     [ ] show maxval
-    [ ] disable closing when recording is started
-    [ ] command can be closed by mistake and the recording will be stop
-        (maybe integrate output in the bottom right and use pyw... or prevent from closing)
-    [ ] text should be scrolling not be replaced
 """
